@@ -62,7 +62,6 @@ const getMaybeZnode = async (client: ZooKeeper, path: string) => {
   return (await client.pathExists(path, false))
     ? Option.some(await client.exists(path, false)) //! This makes the assumption that the znode wasn't deleted between this line and the previous
     : Option.none<stat>();
-
   /* previously had:
   const pathExists = await client.pathExists(path, false);
 
@@ -113,6 +112,7 @@ await targetServer(4001);
 await targetServer(4002);
 
 createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  // Not done yet, but monadify this
   const hosts = await reverseProxyClient.get_children("/hosts", false);
 
   // Bypassing issues with `.toSorted` with Node 18!
@@ -151,9 +151,9 @@ createServer(async (req: IncomingMessage, res: ServerResponse) => {
     method: "GET",
     path: req.url,
   };
-  const proxyReq = http.request(options, (req) => {
-    res.writeHead(req.statusCode || 200, req.headers);
-    req.pipe(res);
+  const proxyReq = http.request(options, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+    proxyRes.pipe(res);
   });
   req.pipe(proxyReq);
 }).listen(4000);

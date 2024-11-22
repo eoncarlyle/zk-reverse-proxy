@@ -1,131 +1,81 @@
-import { createServer, IncomingMessage, ServerResponse } from "node:http";
-
+import http, {createServer, IncomingMessage, ServerResponse} from "node:http";
 import * as R from "ramda";
-import http from "node:http";
 import ZooKeeper from "zookeeper";
+import {createZkClient, zkConfig, CandidateHost, getHostPath} from "./Main.js";
+import * as console from "node:console";
 
-import Option from "./Option.js";
 
-type AppResponse = {
-  statusCode: number;
-  message: string;
-};
+const reverseProxyZkClient = createZkClient(zkConfig);
+const reverseProxyHostStat = await reverseProxyZkClient.get("/hosts", false);
 
-type ZkConfig = {
-  connect: string; //ZK server connection string
-  timeout: number;
-  debug_level: number;
-  host_order_deterministic: boolean;
-};
-
-const appResponse = (statusCode: number, message: string): AppResponse => {
-  return { statusCode: statusCode, message: message };
-};
-
-const getHostPath = (port: number, hostname = "127.0.0.1") =>
-  `/hosts/${hostname}:${port}`;
-
-// Use the Wlaschin typing for hostnames
-const zkConfig = {
-  connect: "127.0.0.1:2181",
-  timeout: 5000,
-  debug_level: ZooKeeper.constants.ZOO_LOG_LEVEL_WARN,
-  host_order_deterministic: false,
-};
-
-const createZkClient = (config: ZkConfig) => {
-  const client = new ZooKeeper(config);
-  client.init(config);
-  return client;
-};
-
-const getAppResponse = R.curry((port: number, m: IncomingMessage) =>
-  R.cond([
-    [
-      (m) => R.and(m.method === "GET", m.url === "/"),
-      R.always(appResponse(200, `Served on port ${port}`)),
-    ],
-    [
-      (m) => m.method !== "GET",
-      R.always(appResponse(405, "Method not supported")),
-    ],
-    [
-      (m) => m.method !== "GET",
-      R.always(appResponse(405, "Method not supported")),
-    ],
-    [(m) => m.url !== "/", R.always(appResponse(404, "Path not found"))],
-    [R.T, R.always(appResponse(500, "Internal Error"))],
-  ])(m),
-);
-
-const getMaybeZnode = async (client: ZooKeeper, path: string) => {
-  return (await client.pathExists(path, false))
-    ? Option.some(await client.exists(path, false)) //! This makes the assumption that the znode wasn't deleted between this line and the previous
-    : Option.none<stat>();
-
-  /* previously had:
-  const pathExists = await client.pathExists(path, false);
-
-  const getOption = R.ifElse(
-    R.always(await client.pathExists(path, false)),
-    R.always(Option.some<stat>(await client.exists(path, false))),
-    R.always(Option.none<stat>()),
-  );
-
-  return getOption(pathExists);
-  */
-};
-
-const targetServer = async (port: number) => {
-  const targetServerClient = createZkClient(zkConfig);
-  const maybeZnode = await getMaybeZnode(targetServerClient, getHostPath(port));
-
-  maybeZnode.map(
-    async (zkStat: stat) =>
-      await targetServerClient.delete_(getHostPath(port), zkStat.version),
-  );
-
-  await targetServerClient.create(
-    getHostPath(port),
-    "0",
-    ZooKeeper.constants.ZOO_EPHEMERAL,
-  );
-
-  createServer((req: IncomingMessage, res: ServerResponse) => {
-    const { statusCode, message } = getAppResponse(port, req);
-    res.writeHead(statusCode);
-    res.end(message);
-  }).listen(port);
-};
-
-const reverseProxyClient = createZkClient(zkConfig);
-const hostsStat = await reverseProxyClient.get("/hosts", false);
-
-if (!hostsStat) {
-  await reverseProxyClient.create(
+if (!reverseProxyHostStat) {
+  await reverseProxyZkClient.create(
     "/hosts",
     "",
     ZooKeeper.constants.ZOO_PERSISTENT,
   );
 }
 
-await targetServer(4001);
-await targetServer(4002);
+const getHttpOptions = (candidateHosts: CandidateHost[], reqUrl: string, candidateHostIndex: number) => {
+  const selectedTargetHost = candidateHosts[candidateHostIndex];
+  const [targetedBaseHostname, targetedPort]: string[] =
+    selectedTargetHost.hostname.split(":");
+
+  return {
+    hostname: targetedBaseHostname,
+    port: parseInt(targetedPort),
+    method: "GET",
+    path: reqUrl
+  }
+}
+
+const updateTargetHostCount = async (candidateHosts: CandidateHost[], candidateHostIndex: number) => {
+  const selectedTargetHost = candidateHosts[candidateHostIndex];
+
+  await reverseProxyZkClient.set(
+    getHostPath(selectedTargetHost.hostname),
+    String(selectedTargetHost.count + 1),
+    selectedTargetHost.version,
+  );
+}
+
+const reverseProxyRetry = async (req: IncomingMessage, res: ServerResponse, candidateHostIndex: number, candidateHosts: CandidateHost[]) => {
+  if (req.url !== undefined) {
+    const options = getHttpOptions(candidateHosts, req.url, 0)
+
+    await updateTargetHostCount(candidateHosts, candidateHostIndex)
+
+    // Need to wrap this?
+    const proxyReq = http.request(options, (req) => {
+      res.writeHead(req.statusCode || 200, req.headers);
+      req.pipe(res)
+    });
+
+    // Delete bad znodes?
+    // We don't want this to block, why not place these requests on a message queue!
+
+    req.pipe(proxyReq)
+      .on("error", () => reverseProxyRetry(req, res, candidateHostIndex + 1, candidateHosts))
+  } else {
+    res.writeHead(400);
+    res.end("Bad Request");
+  }
+}
 
 createServer(async (req: IncomingMessage, res: ServerResponse) => {
-  const hosts = await reverseProxyClient.get_children("/hosts", false);
 
-  // Bypassing issues with `.toSorted` with Node 18!
+  const hosts = await reverseProxyZkClient.get_children("/hosts", false);
+
   const candidateHosts = R.sort(
     R.ascend(R.prop("count")),
     await Promise.all(
-      hosts.map(async (host) => {
-        const [znodeStat, data] = (await reverseProxyClient.get(
-          `/hosts/${host}`,
+      hosts.map(async (hostName) => {
+        const [znodeStat, data] = (await reverseProxyZkClient.get(
+          getHostPath(hostName),
           false,
         )) as [stat, object];
         return {
-          hostWithPort: host,
+          hostname: hostName,
           count: parseInt(data.toString()),
           version: znodeStat.version,
         };
@@ -134,26 +84,22 @@ createServer(async (req: IncomingMessage, res: ServerResponse) => {
   );
   console.log("\nCandidate Hosts:");
   console.log(candidateHosts);
-  const selectedTargetHost = candidateHosts[0];
 
-  const [targetedHostname, targetedPort]: string[] =
-    selectedTargetHost.hostWithPort.split(":");
+  // Need to implement two-pointer to scan through the list of target hosts and return 500 if all have been tried
 
-  await reverseProxyClient.set(
-    getHostPath(parseInt(targetedPort), targetedHostname),
-    String(selectedTargetHost.count + 1),
-    selectedTargetHost.version,
-  );
+  if (req.url !== undefined) {
+    const options = getHttpOptions(candidateHosts, req.url, 0)
+    await updateTargetHostCount(candidateHosts, 0)
 
-  const options = {
-    hostname: targetedHostname,
-    port: parseInt(targetedPort),
-    method: "GET",
-    path: req.url,
-  };
-  const proxyReq = http.request(options, (req) => {
-    res.writeHead(req.statusCode || 200, req.headers);
-    req.pipe(res);
-  });
-  req.pipe(proxyReq);
+    const proxyReq = http.request(options, (req) => {
+      res.writeHead(req.statusCode || 200, req.headers);
+      req.pipe(res)
+    });
+    req.pipe(proxyReq)
+      .on("error", () => reverseProxyRetry(req, res, 1, candidateHosts));
+  } else {
+    res.writeHead(400);
+    res.end("Bad Request");
+  }
 }).listen(4000);
+

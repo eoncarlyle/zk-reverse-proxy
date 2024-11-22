@@ -5,12 +5,15 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "build-and-start": "tsc && node dist/index.js",
+    "buildstart": "tsc && node dist/index.js",
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsc --watch src/index.ts",
+    "dev": "tsc --watch src/Main.ts",
     "type-check": "tsc --noEmit",
-    "lint": "eslint src --ext .ts"
+    "lint": "eslint src --ext .ts",
+    "target1": "node dist/TargetServer 4001",
+    "target2": "node dist/TargetServer 4002",
+    "target3": "node dist/TargetServer 4003"
   },
   "author": "",
   "license": "ISC",
@@ -21,6 +24,7 @@
   "dependencies": {
     "@types/ramda": "^0.30.2",
     "ramda": "^0.30.1",
+    "tsx": "^4.19.2",
     "zookeeper": "^6.2.3"
   }
 }

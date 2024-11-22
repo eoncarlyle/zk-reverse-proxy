@@ -5,6 +5,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "build-and-start": "tsc && node dist/index.js",
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc --watch src/index.ts",

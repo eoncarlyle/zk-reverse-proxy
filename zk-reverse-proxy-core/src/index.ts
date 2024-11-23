@@ -1,21 +1,19 @@
 import http, {createServer, IncomingMessage, ServerResponse} from "node:http";
 import * as R from "ramda";
 import ZooKeeper from "zookeeper";
-import {createZkClient, zkConfig, CandidateHost, getHostPath} from "./Main.js";
+import {createZkClient, zkConfig, CandidateHost, getHostPath, getMaybeZnode} from "./Main.js";
 import * as console from "node:console";
 
+const reverseProxyZk = createZkClient(zkConfig);
+const maybeHostsZnode = await getMaybeZnode(reverseProxyZk, "/hosts")
 
-const reverseProxyZkClient = createZkClient(zkConfig);
-const reverseProxyHostStat = await reverseProxyZkClient.get("/hosts", false);
-
-if (!reverseProxyHostStat) {
-  await reverseProxyZkClient.create(
+if (!maybeHostsZnode.isSome()) {
+  await reverseProxyZk.create(
     "/hosts",
     "",
     ZooKeeper.constants.ZOO_PERSISTENT,
   );
 }
-
 const getHttpOptions = (candidateHosts: CandidateHost[], reqUrl: string, candidateHostIndex: number) => {
   const selectedTargetHost = candidateHosts[candidateHostIndex];
   const [targetedBaseHostname, targetedPort]: string[] =
@@ -32,11 +30,18 @@ const getHttpOptions = (candidateHosts: CandidateHost[], reqUrl: string, candida
 const updateTargetHostCount = async (candidateHosts: CandidateHost[], candidateHostIndex: number) => {
   const selectedTargetHost = candidateHosts[candidateHostIndex];
 
-  await reverseProxyZkClient.set(
-    getHostPath(selectedTargetHost.hostname),
-    String(selectedTargetHost.count + 1),
-    selectedTargetHost.version,
-  );
+  // Noticed load testing failing with '-103 bad version', didn't understand why
+
+  try {
+    await reverseProxyZk.set(
+      getHostPath(selectedTargetHost.hostname),
+      String(selectedTargetHost.count + 1),
+      selectedTargetHost.version,
+    );
+  } catch (e: any) {
+    console.log(selectedTargetHost)
+    throw e;
+  }
 }
 
 const reverseProxyRetry = async (req: IncomingMessage, res: ServerResponse, candidateHostIndex: number, candidateHosts: CandidateHost[]) => {
@@ -64,13 +69,13 @@ const reverseProxyRetry = async (req: IncomingMessage, res: ServerResponse, cand
 
 createServer(async (req: IncomingMessage, res: ServerResponse) => {
 
-  const hosts = await reverseProxyZkClient.get_children("/hosts", false);
+  const hosts = await reverseProxyZk.get_children("/hosts", false);
 
   const candidateHosts = R.sort(
     R.ascend(R.prop("count")),
     await Promise.all(
       hosts.map(async (hostName) => {
-        const [znodeStat, data] = (await reverseProxyZkClient.get(
+        const [znodeStat, data] = (await reverseProxyZk.get(
           getHostPath(hostName),
           false,
         )) as [stat, object];
@@ -82,8 +87,6 @@ createServer(async (req: IncomingMessage, res: ServerResponse) => {
       }),
     ),
   );
-  console.log("\nCandidate Hosts:");
-  console.log(candidateHosts);
 
   // Need to implement two-pointer to scan through the list of target hosts and return 500 if all have been tried
 

@@ -1,6 +1,7 @@
 import ZooKeeper from "zookeeper";
 
 import Option from "./Option.js";
+
 type ZkConfig = {
   connect: string; //ZK server connection string
   timeout: number;
@@ -40,3 +41,9 @@ export const getMaybeZnode = async (client: ZooKeeper, path: string) => {
     ? Option.some(await client.exists(path, false)) //! This makes the assumption that the znode wasn't deleted between this line and the previous
     : Option.none<stat>();
 };
+
+export const createZnodeIfAbsent = async (client: ZooKeeper, path: string, flags?: number) => {
+  if ((await getMaybeZnode(client, path)).isNone()) {
+    client.create(path, "", flags || ZooKeeper.constants.ZOO_PERSISTENT)
+  }
+}

@@ -16,6 +16,16 @@ export type CandidateHost = {
   version: number
 }
 
+export enum HttpMethod {
+  GET = "GET",
+  POST = "POST",
+  PUT = "PUT",
+  DELETE = "DELETE",
+  PATCH = "PATCH",
+  HEAD = "HEAD",
+  OPTIONS = "OPTIONS"
+}
+
 // Only used in target server
 export const getHostPathFromBase = (port: number, baseHostname = "127.0.0.1") =>
   `/hosts/${baseHostname}:${port}`;

@@ -3,6 +3,8 @@ import * as R from "ramda";
 import ZooKeeper from "zookeeper";
 import {createZkClient, zkConfig, CandidateHost, getHostPath, getMaybeZnode} from "./Main.js";
 import * as console from "node:console";
+import * as NodeCache from "node-cache";
+
 
 const reverseProxyZk = createZkClient(zkConfig);
 const maybeHostsZnode = await getMaybeZnode(reverseProxyZk, "/hosts")
@@ -39,25 +41,31 @@ const updateTargetHostCount = async (candidateHosts: CandidateHost[], candidateH
       selectedTargetHost.version,
     );
   } catch (e: any) {
+    console.log("Error with update attempt: ")
     console.log(selectedTargetHost)
     throw e;
   }
 }
 
 const reverseProxyRetry = async (req: IncomingMessage, res: ServerResponse, candidateHostIndex: number, candidateHosts: CandidateHost[]) => {
-  if (req.url !== undefined) {
+  if (candidateHostIndex >= candidateHosts.length) {
+    res.writeHead(500)
+    res.end("Internal Error");
+  } else if (req.url !== undefined) {
     const options = getHttpOptions(candidateHosts, req.url, 0)
 
     await updateTargetHostCount(candidateHosts, candidateHostIndex)
 
-    // Need to wrap this?
+
     const proxyReq = http.request(options, (req) => {
       res.writeHead(req.statusCode || 200, req.headers);
       req.pipe(res)
     });
 
-    // Delete bad znodes?
-    // We don't want this to block, why not place these requests on a message queue!
+    /*
+     Delete bad znodes? We don't want these to block, what if we placed them on a message queue!
+     This is probably a terrible idea, but would be funny to try
+     */
 
     req.pipe(proxyReq)
       .on("error", () => reverseProxyRetry(req, res, candidateHostIndex + 1, candidateHosts))
@@ -88,11 +96,17 @@ createServer(async (req: IncomingMessage, res: ServerResponse) => {
     ),
   );
 
-  // Need to implement two-pointer to scan through the list of target hosts and return 500 if all have been tried
+
+  // Implement fast-aging cache
 
   if (req.url !== undefined) {
     const options = getHttpOptions(candidateHosts, req.url, 0)
-    await updateTargetHostCount(candidateHosts, 0)
+    try {
+      await updateTargetHostCount(candidateHosts, 0)
+    } catch (e: any) {
+      await reverseProxyRetry(req, res, 1, candidateHosts)
+    }
+
 
     const proxyReq = http.request(options, (req) => {
       res.writeHead(req.statusCode || 200, req.headers);

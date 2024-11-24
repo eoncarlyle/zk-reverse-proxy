@@ -16,6 +16,7 @@ export type CandidateHost = {
   version: number
 }
 
+// Only used in target server
 export const getHostPathFromBase = (port: number, baseHostname = "127.0.0.1") =>
   `/hosts/${baseHostname}:${port}`;
 

@@ -3,14 +3,14 @@ config:
   # It's designed to be highly scalable
   target: http://localhost:4000
   phases:
-    - duration: 60
-      arrivalRate: 1
-      rampTo: 5
-      name: Warm up phase
-    - duration: 60
-      arrivalRate: 5
-      rampTo: 10
-      name: Ramp up load
+    #- duration: 60
+    #  arrivalRate: 1
+    #  rampTo: 5
+    #  name: Warm up phase
+    #- duration: 60
+    #  arrivalRate: 5
+    #  rampTo: 10
+    #  name: Ramp up load
     - duration: 30
       arrivalRate: 10
       rampTo: 30
@@ -32,4 +32,14 @@ scenarios:
       - loop:
           - get:
               url: '/'
+          - get:
+              url: '/post/mnos-and-capex-tradeoffs'
+          - get:
+              url: '/post/november-2024-grab-bag'
+          - get:
+              url: '/post/october-2024-gdple-development'
+          - get:
+              url: '/post/ddmf-review'
+          - get:
+              url: '/resume'
         count: 100

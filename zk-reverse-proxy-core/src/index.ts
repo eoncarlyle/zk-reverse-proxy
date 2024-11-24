@@ -46,30 +46,49 @@ const updateTargetHostCount = async (candidateHosts: CandidateHost[], candidateH
   }
 }
 
-const reverseProxyRetry = async (req: IncomingMessage, res: ServerResponse, candidateHostIndex: number, candidateHosts: CandidateHost[]) => {
+// Zero reason not to fold this into a recursive `createServer` defintion
+const reverseProxyRetry = async (outerReq: IncomingMessage, outerRes: ServerResponse, candidateHostIndex: number, candidateHosts: CandidateHost[]) => {
   if (candidateHostIndex >= candidateHosts.length) {
-    res.writeHead(500)
-    res.end("Internal Error");
-  } else if (req.url !== undefined) {
-    const options = getHttpOptions(candidateHosts, req.url, 0)
+    outerRes.writeHead(500)
+    outerRes.end("Internal Error");
+  } else if (outerReq.url !== undefined) {
+    try {
+      const options = getHttpOptions(candidateHosts, outerReq.url, 0)
+      await updateTargetHostCount(candidateHosts, 0)
 
-    await updateTargetHostCount(candidateHosts, candidateHostIndex)
+      const innerReq = http.request(options);
+      // Writing JSON, multipart form, etc. in body would need to happen before this point
+      // While this isn't needed for current implementation, would be required later on
+      innerReq.end();
 
-    const proxyReq = http.request(options, (req) => {
-      res.writeHead(req.statusCode || 200, req.headers);
-      req.pipe(res)
-    });
+      innerReq.on("response", innerRes => {
+        outerRes.writeHead(innerRes.statusCode || 200, outerReq.headers)
 
-    /*
-     Delete bad znodes? We don't want these to block, what if we placed them on a message queue!
-     This is probably a terrible idea, but would be funny to try
-     */
+        // I think the fact that incoming message doesn't just have a body - and that is streamed instead -is meaningful
 
-    req.pipe(proxyReq)
-      .on("error", () => reverseProxyRetry(req, res, candidateHostIndex + 1, candidateHosts))
+        innerRes.setEncoding("utf-8")
+        const body: string[] = [];
+        innerRes.on("data", chunk => {
+          body.push(chunk)
+        })
+        innerRes.on("end", () => {
+          try {
+            outerRes.write(body.join(""))
+            outerRes.end()
+          } catch (e) {
+            outerRes.writeHead(500)
+            outerRes.write("Internal Error")
+            outerRes.end()
+          }
+        })
+      })
+    } catch (e: any) {
+      await reverseProxyRetry(outerReq, outerRes, 1, candidateHosts)
+    }
+
   } else {
-    res.writeHead(400);
-    res.end("Bad Request");
+    outerRes.writeHead(400);
+    outerRes.end("Bad Request");
   }
 }
 
@@ -101,57 +120,51 @@ createServer(async (outerReq: IncomingMessage, outerRes: ServerResponse) => {
    */
 
   if (outerReq.url !== undefined) {
-    const options = getHttpOptions(candidateHosts, outerReq.url, 0)
     try {
+      const options = getHttpOptions(candidateHosts, outerReq.url, 0)
       await updateTargetHostCount(candidateHosts, 0)
+
+      const innerReq = http.request(options);
+      // Writing JSON, multipart form, etc. in body would need to happen before this point
+      // While this isn't needed for current implementation, would be required later on
+      innerReq.end();
+
+      innerReq.on("response", innerRes => {
+        outerRes.writeHead(innerRes.statusCode || 200, outerReq.headers)
+
+        // I think the fact that incoming message doesn't just have a body - and that is streamed instead -is meaningful
+
+        innerRes.setEncoding("utf-8")
+        const body: string[] = [];
+        innerRes.on("data", chunk => {
+          body.push(chunk)
+        })
+        innerRes.on("end", () => {
+          try {
+            outerRes.write(body.join(""))
+            outerRes.end()
+          } catch (e) {
+            outerRes.writeHead(500)
+            outerRes.write("Internal Error")
+            outerRes.end()
+          }
+        })
+      })
+
+      innerReq.on("error", async () => { //Try/catch is not enough, need explicit errors!
+        await reverseProxyRetry(outerReq, outerRes, 1, candidateHosts)
+      })
     } catch (e: any) {
       await reverseProxyRetry(outerReq, outerRes, 1, candidateHosts)
     }
 
-    //const proxyReq = http.request(options, (outerReq) => {
-    //  outerRes.writeHead(outerReq.statusCode || 200, outerReq.headers);
-    //  outerReq.pipe(outerRes)
-    //});
-
-    const innerReq = http.request(options);
-    // Writing JSON, multipart form, etc. in body would need to happen before this point, not sure best way
-    innerReq.end();
-    console.log("here119")
-
-    innerReq.on("response", innerRes => {
-      // 'From "Definitive JavaScript":
-      // We don't care about the response body in this case, but
-      // we don't want it to stick around in a buffer somewhere, so
-      // we put the stream into flowing mode without registering
-      // a "data" handler so that the body is discarded.'
-      console.log("here127")
-      outerRes.writeHead(innerRes.statusCode || 200, outerReq.headers)
-
-      // I think the fact that incoming message doesn't just have a body - and that is streamed instead -is meaningful
-
-      innerRes.setEncoding("utf-8")
-      let body ="";
-      innerRes.on("data", chunk => {body += chunk; console.log(chunk) })
-      innerRes.on("end", () => {
-        try {
-          outerRes.write(body)
-        } catch(e) {
-          outerRes.writeHead(500)
-          outerRes.write("Internal Error")
-        }
-      })
-    })
-
-
-
     // TODO 1: error handling/retry
     // TODO 2:
-//
-//    outerReq.pipe(proxyReq)
-//      .on("error", () => reverseProxyRetry(outerReq, outerRes, 1, candidateHosts));
-//  } else {
-//    outerRes.writeHead(400);
-//    outerRes.end("Bad Request");
-//  }
-}}).listen(4000);
+  } else {
+    outerRes.writeHead(400)
+    outerRes.end("Bad Request")
+  }
+
+
+}).listen(4000);
 

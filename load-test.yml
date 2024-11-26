@@ -14,7 +14,7 @@ config:
     #  name: Ramp up load
     - duration: 30
       arrivalRate: 10
-      rampTo: 30
+      rampTo: 30 # Breaks down when ramping to 300
       name: Spike phase
   # Load & configure a couple of useful plugins
   # https://docs.art/reference/extensions

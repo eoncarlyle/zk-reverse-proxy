@@ -77,11 +77,11 @@ const httpCache = new NodeCache({stdTTL: 100, checkperiod: 120});
 
 const requestListener = async (outerReq: IncomingMessage, outerRes: ServerResponse, incomingTargets: Target[] = [], targetIndex: number = 0) => {
   if (outerReq.url !== undefined && ((incomingTargets.length === 0) || (targetIndex < incomingTargets.length))) {
-    const targets = await getTargets(incomingTargets)
     try {
       //const key = JSON.stringify(options) //Why did `options.path` not work?
       const key = getKey(outerReq.url, outerReq.method)
       if ((outerReq.method !== HttpMethod.GET) || !httpCache.get(key)) {
+        const targets = await getTargets(incomingTargets)
 
         // Should only have to make ZK writes in event of cache miss
         await updateTargetHostCount(targets, targetIndex) // Replacing with shuffle didn't meaningfully improve: search commits
@@ -121,7 +121,7 @@ const requestListener = async (outerReq: IncomingMessage, outerRes: ServerRespon
         outerRes.end(body)
       }
     } catch (e: any) {
-      await requestListener(outerReq, outerRes, targets, targetIndex + 1)
+      await requestListener(outerReq, outerRes, await getTargets(incomingTargets), targetIndex + 1)
     }
   } else if (targetIndex >= incomingTargets.length){
     outerRes.writeHead(500)

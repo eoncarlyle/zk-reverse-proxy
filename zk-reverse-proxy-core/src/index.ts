@@ -14,6 +14,14 @@ import NodeCache from "node-cache";
 const reverseProxyZk = createZkClient(zkConfig);
 await createZnodeIfAbsent(reverseProxyZk, TARGETS_ZNODE_PATH)
 
+// TODO fix typing
+const getKey = (reqUrl: string, method: string | undefined) => {
+  return JSON.stringify({
+    method: method,
+    path: reqUrl
+  })
+}
+
 const getHttpOptions = (targets: Target[], reqUrl: string, index: number, method: HttpMethod = HttpMethod.GET) => {
   const target = targets[index];
   const [hostname, port]: string[] =
@@ -27,7 +35,6 @@ const getHttpOptions = (targets: Target[], reqUrl: string, index: number, method
   }
 }
 
-/*
 const updateTargetHostCount = async (candidateSockets: Target[], candidateIndex: number) => {
   const selectedTargetHost = candidateSockets[candidateIndex];
 
@@ -40,36 +47,14 @@ const updateTargetHostCount = async (candidateSockets: Target[], candidateIndex:
       selectedTargetHost.version, // Non `-1` version reference didn't work on artillery tests until started caching
     );
   } catch (e: any) {
-    console.error(`Error with update attempt: ${selectedTargetHost}`)
+    console.error(`Error with update attempt: ${JSON.stringify(selectedTargetHost)}`)
     throw e;
   }
 }
- */
 
-const shuffle = (array: any[]) => {
-  let currentIndex = array.length;
-
-  // While there remain elements to shuffle...
-  while (currentIndex != 0) {
-
-    // Pick a remaining element...
-    let randomIndex = Math.floor(Math.random() * currentIndex);
-    currentIndex--;
-
-    // And swap it with the current element.
-    [array[currentIndex], array[randomIndex]] = [
-      array[randomIndex], array[currentIndex]];
-  }
-}
-
-
-// Without caching couldn't really pass the Artillery test
-const httpCache = new NodeCache({stdTTL: 100, checkperiod: 120});
-
-const requestListener = async (outerReq: IncomingMessage, outerRes: ServerResponse, incomingTargets: Target[] = [], candidateHostIndex: number = 0) => {
+const getTargets = async (incomingTargets: Target[]) => {
   const sockets = await reverseProxyZk.get_children(TARGETS_ZNODE_PATH, false);
-
-  const targets = incomingTargets.length === 0 ? R.sort(
+  return incomingTargets.length === 0 ? R.sort(
     R.ascend(R.prop("count")),
     await Promise.all(
       sockets.map(async (socket) => {
@@ -85,15 +70,23 @@ const requestListener = async (outerReq: IncomingMessage, outerRes: ServerRespon
       }),
     ),
   ) : incomingTargets
+}
 
-  shuffle(targets)
 
+// Without caching couldn't really pass the Artillery test
+const httpCache = new NodeCache({stdTTL: 100, checkperiod: 120});
+
+const requestListener = async (outerReq: IncomingMessage, outerRes: ServerResponse, incomingTargets: Target[] = [], candidateHostIndex: number = 0) => {
   if (outerReq.url !== undefined) {
+    const targets = await getTargets(incomingTargets)
     try {
-      const options = getHttpOptions(targets, outerReq.url, candidateHostIndex)
-      const key = JSON.stringify(options) //Why did `options.path` not work?
+      //const key = JSON.stringify(options) //Why did `options.path` not work?
+      const key = getKey(outerReq.url, outerReq.method)
       if ((outerReq.method !== HttpMethod.GET) || !httpCache.get(key)) {
-        //await updateTargetHostCount(targets, candidateHostIndex)
+
+        // Should only have to make ZK writes in event of cache miss
+        const options = getHttpOptions(targets, outerReq.url, candidateHostIndex)
+        await updateTargetHostCount(targets, candidateHostIndex) // Replacing with shuffle didn't meaningfully improve: search commits
         const innerReq = http.request(options); // Writing JSON, multipart form, etc. in body would need to happen before this point
         // While this isn't needed for current implementation, would be required later on
         innerReq.end();

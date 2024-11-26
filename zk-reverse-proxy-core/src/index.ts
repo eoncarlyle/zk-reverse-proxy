@@ -8,7 +8,7 @@ import {
   zkConfig,
   TARGETS_ZNODE_PATH, createZnodeIfAbsent
 } from "./Main.js";
-import * as console from "node:console";
+//import * as console from "node:console";
 import NodeCache from "node-cache";
 
 const reverseProxyZk = createZkClient(zkConfig);
@@ -27,6 +27,7 @@ const getHttpOptions = (targets: Target[], reqUrl: string, index: number, method
   }
 }
 
+/*
 const updateTargetHostCount = async (candidateSockets: Target[], candidateIndex: number) => {
   const selectedTargetHost = candidateSockets[candidateIndex];
 
@@ -41,6 +42,23 @@ const updateTargetHostCount = async (candidateSockets: Target[], candidateIndex:
   } catch (e: any) {
     console.error(`Error with update attempt: ${selectedTargetHost}`)
     throw e;
+  }
+}
+ */
+
+const shuffle = (array: any[]) => {
+  let currentIndex = array.length;
+
+  // While there remain elements to shuffle...
+  while (currentIndex != 0) {
+
+    // Pick a remaining element...
+    let randomIndex = Math.floor(Math.random() * currentIndex);
+    currentIndex--;
+
+    // And swap it with the current element.
+    [array[currentIndex], array[randomIndex]] = [
+      array[randomIndex], array[currentIndex]];
   }
 }
 
@@ -68,13 +86,14 @@ const requestListener = async (outerReq: IncomingMessage, outerRes: ServerRespon
     ),
   ) : incomingTargets
 
+  shuffle(targets)
 
   if (outerReq.url !== undefined) {
     try {
       const options = getHttpOptions(targets, outerReq.url, candidateHostIndex)
       const key = JSON.stringify(options) //Why did `options.path` not work?
       if ((outerReq.method !== HttpMethod.GET) || !httpCache.get(key)) {
-        await updateTargetHostCount(targets, candidateHostIndex)
+        //await updateTargetHostCount(targets, candidateHostIndex)
         const innerReq = http.request(options); // Writing JSON, multipart form, etc. in body would need to happen before this point
         // While this isn't needed for current implementation, would be required later on
         innerReq.end();

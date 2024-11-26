@@ -1,12 +1,13 @@
 import http, {createServer, IncomingMessage, ServerResponse} from "node:http";
 import * as R from "ramda";
 import {
-  Target,
   createZkClient,
+  createZnodeIfAbsent,
   getSocket,
   HttpMethod,
-  zkConfig,
-  TARGETS_ZNODE_PATH, createZnodeIfAbsent
+  Target,
+  TARGETS_ZNODE_PATH,
+  zkConfig
 } from "./Main.js";
 //import * as console from "node:console";
 import NodeCache from "node-cache";
@@ -37,8 +38,6 @@ const getHttpOptions = (targets: Target[], reqUrl: string, index: number, method
 
 const updateTargetHostCount = async (candidateSockets: Target[], candidateIndex: number) => {
   const selectedTargetHost = candidateSockets[candidateIndex];
-
-  // Noticed load testing failing with '-103 bad version', didn't understand why
 
   try {
     await reverseProxyZk.set(
@@ -76,8 +75,8 @@ const getTargets = async (incomingTargets: Target[]) => {
 // Without caching couldn't really pass the Artillery test
 const httpCache = new NodeCache({stdTTL: 100, checkperiod: 120});
 
-const requestListener = async (outerReq: IncomingMessage, outerRes: ServerResponse, incomingTargets: Target[] = [], candidateHostIndex: number = 0) => {
-  if (outerReq.url !== undefined) {
+const requestListener = async (outerReq: IncomingMessage, outerRes: ServerResponse, incomingTargets: Target[] = [], targetIndex: number = 0) => {
+  if (outerReq.url !== undefined && ((incomingTargets.length === 0) || (targetIndex < incomingTargets.length))) {
     const targets = await getTargets(incomingTargets)
     try {
       //const key = JSON.stringify(options) //Why did `options.path` not work?
@@ -85,45 +84,49 @@ const requestListener = async (outerReq: IncomingMessage, outerRes: ServerRespon
       if ((outerReq.method !== HttpMethod.GET) || !httpCache.get(key)) {
 
         // Should only have to make ZK writes in event of cache miss
-        const options = getHttpOptions(targets, outerReq.url, candidateHostIndex)
-        await updateTargetHostCount(targets, candidateHostIndex) // Replacing with shuffle didn't meaningfully improve: search commits
-        const innerReq = http.request(options); // Writing JSON, multipart form, etc. in body would need to happen before this point
+        await updateTargetHostCount(targets, targetIndex) // Replacing with shuffle didn't meaningfully improve: search commits
+        const innerReq = http.request(getHttpOptions(targets, outerReq.url, targetIndex));
+        // Writing JSON, multipart form, etc. in body would need to happen before this point
         // While this isn't needed for current implementation, would be required later on
+
         innerReq.end();
         innerReq.on("response", innerRes => { // I think the fact that incoming message doesn't just have a body - and that is streamed instead -is meaningful
           outerRes.writeHead(innerRes.statusCode || 200, outerReq.headers)
-
           innerRes.setEncoding("utf-8")
           const chunks: string[] = [];
+
           innerRes.on("data", chunk => {
             chunks.push(chunk)
           })
-          innerRes.on("end", () => {
+
+          innerRes.on("end", async () => { // Caching required going over to event handlers rather than
             try {
               const body = chunks.join("")
               outerRes.write(body)
               outerRes.end()
               httpCache.set<string>(key, body, 100)
             } catch (e) {
-              outerRes.writeHead(500)
-              outerRes.write("Internal Error")
-              outerRes.end()
+              await requestListener(outerReq, outerRes, targets, targetIndex + 1)
             }
           })
         })
 
-
         innerReq.on("error", async () => { // Try/catch is not enough, need explicit error event listener
-          await requestListener(outerReq, outerRes, targets, candidateHostIndex + 1)
+          await requestListener(outerReq, outerRes, targets, targetIndex + 1)
         })
+
       } else if (httpCache.get(key)) {
         const body = httpCache.get<string>(key)
         outerRes.writeHead(200, outerReq.headers)
         outerRes.end(body)
       }
     } catch (e: any) {
-      await requestListener(outerReq, outerRes, targets, candidateHostIndex + 1)
+      await requestListener(outerReq, outerRes, targets, targetIndex + 1)
     }
+  } else if (targetIndex >= incomingTargets.length){
+    outerRes.writeHead(500)
+    outerRes.write("Internal Error")
+    outerRes.end()
   } else {
     outerRes.writeHead(400)
     outerRes.end("Bad Request")

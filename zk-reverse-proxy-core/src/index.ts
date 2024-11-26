@@ -1,170 +1,122 @@
 import http, {createServer, IncomingMessage, ServerResponse} from "node:http";
 import * as R from "ramda";
-import ZooKeeper from "zookeeper";
-import {CandidateHost, createZkClient, getHostPath, getMaybeZnode, HttpMethod, zkConfig} from "./Main.js";
+import {
+  Target,
+  createZkClient,
+  getSocket,
+  HttpMethod,
+  zkConfig,
+  TARGETS_ZNODE_PATH, createZnodeIfAbsent
+} from "./Main.js";
 import * as console from "node:console";
-
+import NodeCache from "node-cache";
 
 const reverseProxyZk = createZkClient(zkConfig);
-const maybeHostsZnode = await getMaybeZnode(reverseProxyZk, "/hosts")
+await createZnodeIfAbsent(reverseProxyZk, TARGETS_ZNODE_PATH)
 
-if (!maybeHostsZnode.isSome()) {
-  await reverseProxyZk.create(
-    "/hosts",
-    "",
-    ZooKeeper.constants.ZOO_PERSISTENT,
-  );
-}
-const getHttpOptions = (candidateHosts: CandidateHost[], reqUrl: string, candidateHostIndex: number, method: HttpMethod = HttpMethod.GET) => {
-  const selectedTargetHost = candidateHosts[candidateHostIndex];
-  const [targetedBaseHostname, targetedPort]: string[] =
-    selectedTargetHost.hostname.split(":");
+const getHttpOptions = (targets: Target[], reqUrl: string, index: number, method: HttpMethod = HttpMethod.GET) => {
+  const target = targets[index];
+  const [hostname, port]: string[] =
+    target.endpoint.split(":");
 
   return {
-    hostname: targetedBaseHostname,
-    port: parseInt(targetedPort),
+    hostname: hostname,
+    port: parseInt(port),
     method: method,
     path: reqUrl
   }
 }
 
-const updateTargetHostCount = async (candidateHosts: CandidateHost[], candidateHostIndex: number) => {
-  const selectedTargetHost = candidateHosts[candidateHostIndex];
+const updateTargetHostCount = async (candidateSockets: Target[], candidateIndex: number) => {
+  const selectedTargetHost = candidateSockets[candidateIndex];
 
   // Noticed load testing failing with '-103 bad version', didn't understand why
 
   try {
     await reverseProxyZk.set(
-      getHostPath(selectedTargetHost.hostname),
+      getSocket(selectedTargetHost.endpoint),
       String(selectedTargetHost.count + 1),
-      selectedTargetHost.version,
+      selectedTargetHost.version, // Non `-1` version reference didn't work on artillery tests until started caching
     );
   } catch (e: any) {
-    console.log("Error with update attempt: ")
-    console.log(selectedTargetHost)
+    console.error(`Error with update attempt: ${selectedTargetHost}`)
     throw e;
   }
 }
 
-// Zero reason not to fold this into a recursive `createServer` defintion
-const reverseProxyRetry = async (outerReq: IncomingMessage, outerRes: ServerResponse, candidateHostIndex: number, candidateHosts: CandidateHost[]) => {
-  if (candidateHostIndex >= candidateHosts.length) {
-    outerRes.writeHead(500)
-    outerRes.end("Internal Error");
-  } else if (outerReq.url !== undefined) {
-    try {
-      const options = getHttpOptions(candidateHosts, outerReq.url, 0)
-      await updateTargetHostCount(candidateHosts, 0)
 
-      const innerReq = http.request(options);
-      // Writing JSON, multipart form, etc. in body would need to happen before this point
-      // While this isn't needed for current implementation, would be required later on
-      innerReq.end();
+// Without caching couldn't really pass the Artillery test
+const httpCache = new NodeCache({stdTTL: 100, checkperiod: 120});
 
-      innerReq.on("response", innerRes => {
-        outerRes.writeHead(innerRes.statusCode || 200, outerReq.headers)
+const requestListener = async (outerReq: IncomingMessage, outerRes: ServerResponse, incomingTargets: Target[] = [], candidateHostIndex: number = 0) => {
+  const sockets = await reverseProxyZk.get_children(TARGETS_ZNODE_PATH, false);
 
-        // I think the fact that incoming message doesn't just have a body - and that is streamed instead -is meaningful
-
-        innerRes.setEncoding("utf-8")
-        const body: string[] = [];
-        innerRes.on("data", chunk => {
-          body.push(chunk)
-        })
-        innerRes.on("end", () => {
-          try {
-            outerRes.write(body.join(""))
-            outerRes.end()
-          } catch (e) {
-            outerRes.writeHead(500)
-            outerRes.write("Internal Error")
-            outerRes.end()
-          }
-        })
-      })
-    } catch (e: any) {
-      await reverseProxyRetry(outerReq, outerRes, 1, candidateHosts)
-    }
-
-  } else {
-    outerRes.writeHead(400);
-    outerRes.end("Bad Request");
-  }
-}
-
-createServer(async (outerReq: IncomingMessage, outerRes: ServerResponse) => {
-
-  const hosts = await reverseProxyZk.get_children("/hosts", false);
-
-  const candidateHosts = R.sort(
+  const targets = incomingTargets.length === 0 ? R.sort(
     R.ascend(R.prop("count")),
     await Promise.all(
-      hosts.map(async (hostName) => {
+      sockets.map(async (socket) => {
         const [znodeStat, data] = (await reverseProxyZk.get(
-          getHostPath(hostName),
+          getSocket(socket),
           false,
         )) as [stat, object];
         return {
-          hostname: hostName,
-          count: parseInt(data.toString()),
+          endpoint: socket,
+          count: data ? parseInt(data.toString()) : 0,
           version: znodeStat.version,
         };
       }),
     ),
-  );
+  ) : incomingTargets
 
-
-  /*
-  Implement fast-aging cache: because pipes are not discrete requests for a discrete endpoint, they won't play well
-  with chaching
-   */
 
   if (outerReq.url !== undefined) {
     try {
-      const options = getHttpOptions(candidateHosts, outerReq.url, 0)
-      await updateTargetHostCount(candidateHosts, 0)
+      const options = getHttpOptions(targets, outerReq.url, candidateHostIndex)
+      const key = JSON.stringify(options) //Why did `options.path` not work?
+      if ((outerReq.method !== HttpMethod.GET) || !httpCache.get(key)) {
+        await updateTargetHostCount(targets, candidateHostIndex)
+        const innerReq = http.request(options); // Writing JSON, multipart form, etc. in body would need to happen before this point
+        // While this isn't needed for current implementation, would be required later on
+        innerReq.end();
+        innerReq.on("response", innerRes => { // I think the fact that incoming message doesn't just have a body - and that is streamed instead -is meaningful
+          outerRes.writeHead(innerRes.statusCode || 200, outerReq.headers)
 
-      const innerReq = http.request(options);
-      // Writing JSON, multipart form, etc. in body would need to happen before this point
-      // While this isn't needed for current implementation, would be required later on
-      innerReq.end();
-
-      innerReq.on("response", innerRes => {
-        outerRes.writeHead(innerRes.statusCode || 200, outerReq.headers)
-
-        // I think the fact that incoming message doesn't just have a body - and that is streamed instead -is meaningful
-
-        innerRes.setEncoding("utf-8")
-        const body: string[] = [];
-        innerRes.on("data", chunk => {
-          body.push(chunk)
+          innerRes.setEncoding("utf-8")
+          const chunks: string[] = [];
+          innerRes.on("data", chunk => {
+            chunks.push(chunk)
+          })
+          innerRes.on("end", () => {
+            try {
+              const body = chunks.join("")
+              outerRes.write(body)
+              outerRes.end()
+              httpCache.set<string>(key, body, 100)
+            } catch (e) {
+              outerRes.writeHead(500)
+              outerRes.write("Internal Error")
+              outerRes.end()
+            }
+          })
         })
-        innerRes.on("end", () => {
-          try {
-            outerRes.write(body.join(""))
-            outerRes.end()
-          } catch (e) {
-            outerRes.writeHead(500)
-            outerRes.write("Internal Error")
-            outerRes.end()
-          }
-        })
-      })
 
-      innerReq.on("error", async () => { //Try/catch is not enough, need explicit errors!
-        await reverseProxyRetry(outerReq, outerRes, 1, candidateHosts)
-      })
+
+        innerReq.on("error", async () => { // Try/catch is not enough, need explicit error event listener
+          await requestListener(outerReq, outerRes, targets, candidateHostIndex + 1)
+        })
+      } else if (httpCache.get(key)) {
+        const body = httpCache.get<string>(key)
+        outerRes.writeHead(200, outerReq.headers)
+        outerRes.end(body)
+      }
     } catch (e: any) {
-      await reverseProxyRetry(outerReq, outerRes, 1, candidateHosts)
+      await requestListener(outerReq, outerRes, targets, candidateHostIndex + 1)
     }
-
-    // TODO 1: error handling/retry
-    // TODO 2:
   } else {
     outerRes.writeHead(400)
     outerRes.end("Bad Request")
   }
+}
 
-
-}).listen(4000);
+createServer(requestListener).listen(4000);
 

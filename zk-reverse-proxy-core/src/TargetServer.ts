@@ -2,7 +2,14 @@ import ZooKeeper from "zookeeper";
 import {createServer, IncomingMessage, ServerResponse} from "node:http";
 import * as process from "node:process";
 
-import {zkConfig, createZkClient, getMaybeZnode, getHostPathFromBase, createZnodeIfAbsent} from "./Main.js";
+import {
+  zkConfig,
+  createZkClient,
+  getMaybeZnode,
+  getSocketFromPort,
+  createZnodeIfAbsent,
+  TARGETS_ZNODE_PATH
+} from "./Main.js";
 import * as R from "ramda";
 
 
@@ -34,15 +41,15 @@ const getAppResponse = (port: number, m: IncomingMessage) =>
   ])(m);
 
 const targetServer = async (zkClient: ZooKeeper, port: number) => {
-  const maybeZnode = await getMaybeZnode(zkClient, getHostPathFromBase(port));
+  const maybeZnode = await getMaybeZnode(zkClient, getSocketFromPort(port));
 
   maybeZnode.map(
     async (zkStat: stat) =>
-      await zkClient.delete_(getHostPathFromBase(port), zkStat.version),
+      await zkClient.delete_(getSocketFromPort(port), zkStat.version),
   );
 
   await zkClient.create(
-    getHostPathFromBase(port),
+    getSocketFromPort(port),
     "0",
     ZooKeeper.constants.ZOO_EPHEMERAL,
   );
@@ -56,7 +63,7 @@ const targetServer = async (zkClient: ZooKeeper, port: number) => {
 
 const targetServerZk = createZkClient(zkConfig);
 
-createZnodeIfAbsent(targetServerZk, "/hosts")
+createZnodeIfAbsent(targetServerZk, TARGETS_ZNODE_PATH)
 
 
 if (process.argv.length !== 3) {

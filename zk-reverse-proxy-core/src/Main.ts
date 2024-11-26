@@ -10,11 +10,13 @@ type ZkConfig = {
 };
 
 // Reffering to 'hostnames' as including ports while 'baseHostname' does not have the port
-export type CandidateHost = {
-  hostname: string;
+export type Target = {
+  endpoint: string;
   count: number;
   version: number
 }
+
+export const TARGETS_ZNODE_PATH = "/targets"
 
 export enum HttpMethod {
   GET = "GET",
@@ -27,13 +29,12 @@ export enum HttpMethod {
 }
 
 // Only used in target server
-export const getHostPathFromBase = (port: number, baseHostname = "127.0.0.1") =>
-  `/hosts/${baseHostname}:${port}`;
+export const getSocketFromPort = (port: number, hostname = "127.0.0.1") =>
+  `${TARGETS_ZNODE_PATH}/${hostname}:${port}`;
 
-export const getHostPath = (hostname: string) => `/hosts/${hostname}`
+export const getSocket = (hostname: string) => `${TARGETS_ZNODE_PATH}/${hostname}`
 
 
-// Use the Wlaschin typing for hostnames
 export const zkConfig = {
   connect: "127.0.0.1:2181",
   timeout: 5000,
@@ -55,6 +56,6 @@ export const getMaybeZnode = async (client: ZooKeeper, path: string) => {
 
 export const createZnodeIfAbsent = async (client: ZooKeeper, path: string, flags?: number) => {
   if ((await getMaybeZnode(client, path)).isNone()) {
-    client.create(path, "", flags || ZooKeeper.constants.ZOO_PERSISTENT)
+    await client.create(path, "", flags || ZooKeeper.constants.ZOO_PERSISTENT)
   }
 }
